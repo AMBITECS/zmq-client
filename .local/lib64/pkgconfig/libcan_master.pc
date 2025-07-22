@@ -1,0 +1,10 @@
+prefix=:;/home/master/Ambi/Work/Projects/procont-ex/utils/CANopen/MasterQtFree/.install
+exec_prefix=
+libdir=:;${prefix}/lib64
+includedir=:;${prefix}/include
+
+Name: can_master
+Description: CAN Master library
+Version: 
+Libs: -L${libdir} -lcan_master
+Cflags: -I${includedir}/can_master

@@ -1,0 +1,117 @@
+    /**
+     * @brief Отправка программы на сервер
+     * @param program_name Имя программы
+     * @param file_paths Пути к файлам программы
+     */
+    void send_program(const std::string& program_name, const std::vector<std::string>& file_paths) {
+        uint64_t program_hash = calculate_program_hash(file_paths);
+
+        json prog_start = {
+                {"key", client_id_},
+                {"request", "prog_start"},
+                {"prog_name", program_name},
+                {"prog_hash", program_hash}
+        };
+        send_message(prog_start);
+
+        for (const auto& file_path : file_paths) {
+            send_file(file_path);
+        }
+
+        json prog_end = {
+                {"key", client_id_},
+                {"request", "prog_end"}
+        };
+        send_message(prog_end);
+    }
+
+    /**
+     * @brief Отправка одного файла
+     * @param file_path Путь к файлу
+     */
+    void send_file(const std::string& file_path) {
+        fs::path path(file_path);
+        std::string file_name = path.filename().string();
+        uint64_t file_size = fs::file_size(path);
+
+        // 1. Отправляем file_start
+        json file_start = {
+                {"key", client_id_},
+                {"request", "file_start"},
+                {"file_name", file_name},
+                {"file_size", file_size}
+        };
+        send_message(file_start);
+
+        std::ifstream file(file_path, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "Failed to open file: " << file_path << std::endl;
+            return;
+        }
+
+        const size_t CHUNK_SIZE = 63 * 1024; // Оптимальный размер для Base64
+        std::vector<char> buffer(CHUNK_SIZE);
+        uint64_t total_sent = 0;
+
+        // 2. Отправляем чанки файла
+        while (file) {
+            file.read(buffer.data(), buffer.size());
+            size_t bytes_read = file.gcount();
+
+            if (bytes_read > 0) {
+                std::string chunk_data(buffer.data(), bytes_read);
+                std::string encoded = utils::base64_encode(chunk_data);
+
+                json file_chunk = {
+                        {"key", client_id_},
+                        {"request", "file_chunk"},
+                        {"chunk_data", encoded},
+                        {"chunk_size", bytes_read} // Оригинальный размер, не закодированный
+                };
+
+                if (!send_message(file_chunk)) {
+                    std::cerr << "Failed to send chunk" << std::endl;
+                    break;
+                }
+
+                total_sent += bytes_read;
+                if (debug_mode_) {
+                    float progress = (total_sent * 100.0f) / file_size;
+                    std::cout << "\rProgress: " << std::fixed << std::setprecision(1)
+                              << progress << "% (" << total_sent << "/" << file_size << ")";
+                    std::cout.flush();
+                }
+            }
+        }
+
+        // 3. Отправляем file_end
+        json file_end = {
+                {"key", client_id_},
+                {"request", "file_end"}
+        };
+        send_message(file_end);
+
+        if (debug_mode_) {
+            std::cout << "\nFile transfer completed: " << file_name
+                      << " (" << file_size << " bytes)" << std::endl;
+        }
+    }
+
+    /**
+     * @brief Расчет хеша программы
+     * @param file_paths Пути к файлам программы
+     * @return Хеш программы
+     */
+    static uint64_t calculate_program_hash(const std::vector<std::string>& file_paths) {
+        uint64_t combined_hash = 0;
+
+        for (const auto& file_path : file_paths) {
+            uint32_t file_crc = utils::calculate_file_crc32(file_path);
+            uint64_t file_size = fs::file_size(file_path);
+            combined_hash ^= (static_cast<uint64_t>(file_crc) << 32) | file_size;
+        }
+
+        return combined_hash;
+    }
+};
+

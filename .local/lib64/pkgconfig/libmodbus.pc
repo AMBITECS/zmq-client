@@ -1,0 +1,10 @@
+prefix=:;/home/master/Ambi/Work/Projects/procont-ex/utils/libmodbus/.install
+exec_prefix=
+libdir=:;${prefix}/lib64
+includedir=:;${prefix}/include
+
+Name: modbus
+Description: Modbus library
+Version: 
+Libs: -L${libdir} -lmodbus
+Cflags: -I${includedir}/modbus

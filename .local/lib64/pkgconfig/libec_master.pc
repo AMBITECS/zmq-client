@@ -1,0 +1,10 @@
+prefix=:;/home/master/Ambi/Work/Projects/procont-ex/utils/EtherCAT/ECMaster/.install
+exec_prefix=
+libdir=:;${prefix}/lib64
+includedir=:;${prefix}/include
+
+Name: ec_master
+Description: EC Master library
+Version: 
+Libs: -L${libdir} -lec_master
+Cflags: -I${includedir}/ec_master

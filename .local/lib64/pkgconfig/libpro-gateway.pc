@@ -1,0 +1,10 @@
+prefix=:;/home/master/Ambi/Work/Projects/procont-ex/utils/Gateway/.install
+exec_prefix=
+libdir=:;${prefix}/lib64
+includedir=:;${prefix}/include
+
+Name: pro-gateway
+Description: Procont Gateway library
+Version: 
+Libs: -L${libdir} -lpro-gateway
+Cflags: -I${includedir}/pro-gateway
