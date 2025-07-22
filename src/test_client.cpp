@@ -27,7 +27,9 @@ using namespace std::chrono_literals;
     #include <termios.h>
     #include <unistd.h>
     #include <cstdlib>
+
     struct termios original_termios;
+
 #endif
 #include <iostream>
 #include <string>
@@ -191,7 +193,8 @@ class TestClient {
     std::atomic<bool> sockets_ready_{false};  // Флаг готовности сокетов
     std::atomic<bool> running_{false};        // Флаг работы клиента
     std::atomic<bool> connection_ok_{false};  // Флаг состояния соединения
-    std::atomic<bool> trying_to_connect_{false}; // Флаг попытки переподключения
+
+    std::atomic<bool> start_complete{false}; // Флаг попытки переподключения
     std::atomic<bool> heartbeat_active_{false}; // Флаг активности heartbeat
 
     bool debug_mode_{false};                   // Режим отладки
@@ -250,16 +253,13 @@ public:
         connection_monitor_thread_ = std::thread(&TestClient::connection_and_heartbeat_loop, this);
         listen_thread_ = std::thread(&TestClient::listen_loop, this);
 
-
         // Первая попытка подключения
-        if (connect()) {
-            connection_ok_ = true;
-        } else {
-            if (debug_mode_) {
-                std::cerr << "Initial connection failed, will keep trying...\n";
-            }
-
+        connection_ok_ = connect();
+        if (!connection_ok_ && debug_mode_) {
+            std::cerr << "Initial connection failed, will keep trying...\n";
         }
+
+        start_complete = true;
     }
 
     /**
@@ -291,7 +291,8 @@ public:
         // 5. Закрытие сокетов
         cleanup_resources();
 
-        // 7. Закрытие контекста (через деструктор)
+        // 7. Закрытие контекста через деструктор или явно:
+        ctx_.close();
     }
 
     /**
@@ -299,8 +300,11 @@ public:
      */
     void runMenu() {
         while (running_) {
-            printMenu();
-
+            debug_mode_ = false;
+            {
+                //std::lock_guard<std::mutex> lock(console_mutex_);
+                printMenu();
+            }
             int choice = -1;
             std::cin >> choice;  // Блокирующий ввод (ждёт пользователя)
 
@@ -311,10 +315,9 @@ public:
             }
 
             clear_screen();
-            if (choice == 0) {
-                running_ = false;
-            } else {
-                debug_mode_ = true;
+            if (choice == 0) { running_ = false; }
+            else
+            {
                 handleMenuChoice(choice);
                 debug_mode_ = false;
 
@@ -322,42 +325,10 @@ public:
                 std::cout << "\nPress Enter to return to menu...";
                 std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
                 std::cin.get();
+
             }
         }
     }
-
-//    void runMenu() {
-//        while (running_) {
-//            printMenu();
-//
-//            // Ожидаем ввод с таймаутом для проверки соединения
-//            if (wait_for_input(100ms)) {
-//                int choice;
-//                if (std::cin >> choice) {
-//                    clear_screen();
-//
-//                    if (choice == 0) {
-//                        running_ = false;
-//                    } else {
-//                        debug_mode_ = true;
-//
-//                        handleMenuChoice(choice);
-//
-//                        // Пауза перед возвратом в меню
-//                        std::cout << "\nPress Enter to return to menu...";
-//                        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-//                        std::cin.get();
-//
-//                        debug_mode_ = false;
-//
-//                    }
-//                } else {
-//                    std::cin.clear();
-//                    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-//                }
-//            }
-//        }
-//    }
 
 private:
     /* Вспомогательные методы */
@@ -376,53 +347,29 @@ private:
     }
 
     bool send_message(const json& message, RequestMode mode,
-                      std::chrono::milliseconds timeout = 2s,
-                      Response* out_response = nullptr) {
-        std::unique_lock<std::mutex> lock(send_mutex_);
-
-        // 1. Подготовка запроса
+                      std::chrono::milliseconds timeout,
+                      Response* out_response)
+    {
         std::shared_ptr<SyncRequest> sync_request;
+
         if (mode == RequestMode::Sync) {
-            if (!out_response) return false;
-
             sync_request = request_manager_.create(
-                    message["key"].get<std::string>(),
-                    message["request"].get<std::string>()
+                message["key"].get<std::string>(),
+                message["request"].get<std::string>()
             );
-
-            // Добавляем таймстемп для отладки
-            if (debug_mode_) {
-                std::cout << "[REQ] Sending: " << message.dump()
-                          << " (timeout: " << timeout.count() << "ms)\n";
-            }
         }
 
-        // 2. Отправка сообщения
         try {
             zmq::message_t zmq_msg(message.dump());
-            auto send_result = adm_socket_.send(zmq_msg, zmq::send_flags::dontwait);
-            if (!send_result) {
-                if (debug_mode_) std::cerr << "[REQ] Send failed (EAGAIN)\n";
-                return false;
-            }
-        } catch (const zmq::error_t& e) {
-            if (debug_mode_) std::cerr << "[REQ] Send error: " << e.what() << "\n";
-            connection_ok_ = false;
+            adm_socket_.send(zmq_msg, zmq::send_flags::dontwait);
+        } catch (...) {
             return false;
         }
 
-        // 3. Ожидание ответа (только для синхронного режима)
-        if (mode == RequestMode::Sync && sync_request) {
-            lock.unlock(); // Важно: отпускаем мьютекс перед ожиданием
-
-            bool success = sync_request->wait(*out_response, timeout);
-
-            if (debug_mode_) {
-                std::cout << "[REQ] Wait result: " << (success ? "OK" : "TIMEOUT")
-                          << ", Response: " << out_response->toJSON() << "\n";
-            }
-
-            return success;
+        if (mode == RequestMode::Sync) {
+            // Ожидаем ответ
+            bool bOk = sync_request->wait(*out_response, timeout);
+            return bOk;
         }
 
         return true;
@@ -478,21 +425,13 @@ private:
                response.isSuccess();
     }
 
-
     void cleanup_resources() {
         try {
             sockets_ready_ = false;
-
-            if (adm_socket_.handle() != nullptr) {
-                adm_socket_.close();
-            }
-            if (sub_socket_.handle() != nullptr) {
-                sub_socket_.close();
-            }
+            if (adm_socket_.handle() != nullptr) {adm_socket_.close();}
+            if (sub_socket_.handle() != nullptr) {sub_socket_.close();}
         } catch (...) {
-            if (debug_mode_) {
-                std::cerr << "Warning: error during socket cleanup\n";
-            }
+            if (debug_mode_) { std::cerr << "Warning: error during socket cleanup\n"; }
         }
     }
 
@@ -502,8 +441,8 @@ private:
     bool connect() {
         std::lock_guard<std::mutex> lock(connection_mutex_);
         if (connection_ok_) return true;
+        //if (!ready_to_connect_) return false;
         bool result = false;
-        trying_to_connect_ = true;
         cleanup_resources();
         try {
             adm_socket_ = zmq::socket_t(ctx_, zmq::socket_type::dealer);
@@ -526,7 +465,6 @@ private:
             }
             cleanup_resources();
         }
-        trying_to_connect_ = false;
         return result;
     }
 
@@ -534,8 +472,7 @@ private:
         if (connection_ok_ != connected) {
             connection_ok_ = connected;
             if (debug_mode_) {
-                std::cerr << "Connection state changed to: "
-                          << (connected ? "ONLINE" : "OFFLINE") << "\n";
+                std::cerr << "Connection state changed to: " << (connected ? "ONLINE" : "OFFLINE") << "\n";
             }
             // Принудительная перерисовка меню
             if (running_) {
@@ -549,11 +486,12 @@ private:
      */
     void connection_and_heartbeat_loop() {
         while (running_) {
+            if (!start_complete) { std::this_thread::sleep_for(100ms); continue; }
             bool current_state = connection_ok_;
             if (!current_state) {
-                current_state = connect(); // Пытаемся подключиться
+                current_state = connect();          // Пытаемся подключиться
             } else {
-                current_state = send_heartbeat(); // Проверяем соединение
+                current_state = send_heartbeat();   // Проверяем соединение
             }
             notify_connection_state(current_state);
             std::this_thread::sleep_for(current_state ? 3s : 5s);
@@ -584,10 +522,7 @@ private:
      */
     void listen_loop() {
         while (running_) {
-            if (!sockets_ready_) {
-                std::this_thread::sleep_for(100ms);
-                continue;
-            }
+            if (!sockets_ready_) { std::this_thread::sleep_for(100ms); continue; }
 
             zmq::pollitem_t items[] = {
                     {sub_socket_, 0, ZMQ_POLLIN, 0},
@@ -622,22 +557,15 @@ private:
             }
             catch (const zmq::error_t& e) {
                 if (e.num() == EINTR) continue;  // Игнорируем прерывания
-                if (debug_mode_) {
-                    std::cerr << "[ZMQ ERROR] " << e.what()
-                              << " (errno: " << e.num() << ")\n";
-                }
+                if (debug_mode_) { std::cerr << "[ZMQ ERROR] " << e.what() << " (errno: " << e.num() << ")\n"; }
                 connection_ok_ = false;
             }
             catch (const std::exception& e) {
-                if (debug_mode_) {
-                    std::cerr << "[STD ERROR] " << e.what() << "\n";
-                }
+                if (debug_mode_) { std::cerr << "[STD ERROR] " << e.what() << "\n"; }
                 connection_ok_ = false;
             }
             catch (...) {
-                if (debug_mode_) {
-                    std::cerr << "[UNKNOWN ERROR] Unexpected exception\n";
-                }
+                if (debug_mode_) { std::cerr << "[UNKNOWN ERROR] Unexpected exception\n"; }
                 connection_ok_ = false;
             }
         }
@@ -748,27 +676,53 @@ private:
             auto response = Response::fromJSON(msg.to_string());
 
             // Сначала пробуем обработать как синхронный ответ
-            if (!request_manager_.process_response(response)) {
-
-                // Асинхронные сообщения
+            if (!request_manager_.process_response(response))
+            {
+                // Обработка асинхронных сообщений
                 if (response.request == "heartbeat") {
-                    //last_heartbeat_ = std::chrono::steady_clock::now();
+                    update_heartbeat_time();
                     return;
                 }
 
-                // Other responses
+                // ... другая асинхронная обработка
                 if (debug_mode_) {
                     std::cout << "[ADM] Response: " << response.toJSON() << "\n";
                 }
 
             }
-
         } catch(const json::exception& e) {
             if (debug_mode_) {
                 std::cerr << "Failed to parse response: " << e.what() << "\n";
             }
         }
     }
+
+//    void handle_adm_message(zmq::message_t& msg) {
+//        try {
+//            auto response = Response::fromJSON(msg.to_string());
+//
+//            // Сначала пробуем обработать как синхронный ответ
+//            if (!request_manager_.process_response(response)) {
+//
+//                // Асинхронные сообщения
+//                if (response.request == "heartbeat") {
+//                    //last_heartbeat_ = std::chrono::steady_clock::now();
+//                    return;
+//                }
+//
+//                // Other responses
+//                if (debug_mode_) {
+//                    std::cout << "[ADM] Response: " << response.toJSON() << "\n";
+//                }
+//
+//            }
+//
+//        } catch(const json::exception& e) {
+//            if (debug_mode_) {
+//                std::cerr << "Failed to parse response: " << e.what() << "\n";
+//            }
+//        }
+//    }
 
     std::vector<Tag> getLastUpdates() {
         std::lock_guard<std::mutex> lock(updates_mutex_);
@@ -815,12 +769,13 @@ private:
      */
     void handleMenuChoice(int choice) {
             if (choice != 0) {
-                if (!connection_ok_) return;
+                if (!connection_ok_) { std::cerr << "Not connected to server!\n"; return; }
                 switch (choice) {
-                    case 1: testSubscribe(); break;
-                    case 2: testUnsubscribe(); break;
+                    case 1: testSubscribe();    break;
+                    case 2: testUnsubscribe();  break;
                     case 3: testFileTransfer(); break;
-                    case 4: { // Добавляем новый пункт меню
+                    case 4:
+                    {
                         std::string status;
                         if (getExecutionStatus(status)) {
                             std::cout << "Current PLC status: " << status << "\n";
@@ -829,35 +784,11 @@ private:
                         }
                         break;
                     }
-                    case 5:
-                        if (sendExecutionStart()) {
-                            std::cout << "Start command sent successfully\n";
-                        }
-                        break;
-                    case 6:
-                        if (sendExecutionStop()) {
-                            std::cout << "Stop command sent successfully\n";
-                        }
-                        break;
-                    case 7: // Pause
-                        if (connection_ok_) {
-                            if (sendExecutionPause()) {
-                                std::cout << "Pause command sent successfully\n";
-                            }
-                        } else {
-                            std::cerr << "Not connected to server!\n";
-                        }
-                        break;
+                    case 5: if (sendExecutionStart())  std::cout << "Start command sent successfully\n";  break;
+                    case 6: if (sendExecutionStop())   std::cout << "Stop command sent successfully\n";   break;
+                    case 7: if (sendExecutionPause())  std::cout << "Pause command sent successfully\n";  break;
+                    case 8: if (sendExecutionResume()) std::cout << "Resume command sent successfully\n"; break;
 
-                    case 8: // Resume
-                        if (connection_ok_) {
-                            if (sendExecutionResume()) {
-                                std::cout << "Resume command sent successfully\n";
-                            }
-                        } else {
-                            std::cerr << "Not connected to server!\n";
-                        }
-                        break;
                     case 9: readTagValue(); break;
                     case 10: writeTagValue(); break;
                     default:
@@ -984,6 +915,7 @@ private:
         // Читаем всю строку
         std::string input;
         std::getline(std::cin, input);
+        debug_mode_ = true;
 
         // Разделяем теги
         std::vector<std::string> tags;
@@ -1017,6 +949,7 @@ private:
      * @brief Тест отписки от регистров
      */
     void testUnsubscribe() {
+        debug_mode_ = true;
         std::cout << "\n=== Unsubscribe Test ===\n";
         json msg = {
                 {"key", client_id_},
@@ -1031,6 +964,7 @@ private:
      * @brief Тест передачи файлов
      */
     void testFileTransfer() {
+        std::cout << "Current directory: \n" << std::filesystem::current_path() << std::endl << std::flush;
         std::cout << "\n=== File Transfer Test ===\n";
 
         // Очистка буфера ввода перед чтением
@@ -1065,6 +999,7 @@ private:
 
             files.push_back(file_path);
         }
+        debug_mode_ = true;
 
         if (files.empty()) {
             std::cout << "No files to transfer\n";
@@ -1196,26 +1131,6 @@ private:
 /**
  * @brief Точка входа в программу
  */
-//int main() {
-//#ifdef _WIN32
-//    enable_ansi_colors();
-//#else
-//    setenv("TERM", "xterm-256color", 1);  // Перезаписать, если переменная уже есть
-//#endif
-//
-//    try {
-//        TestClient client("test_client_1", "192.168.1.68");
-//        client.start();
-//        client.runMenu();
-//        client.stop();
-//    }
-//    catch (const std::exception& e) {
-//        std::cerr << "Error: " << e.what() << std::endl;
-//        return 1;
-//    }
-//    return 0;
-//}
-
 int main() {
 #ifdef _WIN32
     enable_ansi_colors();
@@ -1223,21 +1138,19 @@ int main() {
     // Перезаписать, если переменная уже есть
     setenv("TERM", "xterm-256color", 1);
 #endif
-
     try {
         std::string server_address;
 
         // Запрос адреса сервера
         std::cout << "=== ZMQ Client ===" << std::endl;
-        std::cout << "Enter server address [default: 192.168.1.68]: ";
+        std::cout << "Enter server address [default: localhost]: ";
         std::getline(std::cin, server_address);
 
         // Установка адреса по умолчанию, если ввод пустой
-        if (server_address.empty()) {
-            server_address = "192.168.1.68";
-            std::cout << "Using default address: " << server_address << std::endl;
-        }
+        if (server_address.empty())  server_address = "localhost";
+        std::cout << "Using default address: " << server_address << std::endl;
 
+        // Работа клиента
         TestClient client("test_client_1", server_address);
         client.start();
         client.runMenu();
@@ -1245,7 +1158,7 @@ int main() {
     }
     catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
+        std::terminate();
     }
     return 0;
 }

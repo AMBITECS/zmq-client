@@ -9,7 +9,10 @@ set(LOCAL_LIB_DIR ${CMAKE_SOURCE_DIR}/lib)
 set(LOCAL_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 
 # Установка выходного каталога для бинарников
-set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/bin)
+set(EXECUTABLE_OUTPUT_PATH ${CMAKE_SOURCE_DIR}/bin)
+
+# Устанавливаем выходной каталог для исполняемых файлов
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
 # 1. Ручной поиск ZeroMQ
 find_library(ZMQ_LIBRARY
